@@ -1,0 +1,1 @@
+web: gunicorn craftconnect.wsgi:application --timeout 500
