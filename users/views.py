@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 
 
-# ✅ Artisan Registration
+#Artisan Registration
 @swagger_auto_schema(
     method='post',
     operation_description="Register a new Artisan user.",
@@ -43,7 +43,7 @@ def artisan_register(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# ✅ Client Registration
+#Client Registration
 @swagger_auto_schema(
     method='post',
     operation_description="Register a new Client user.",

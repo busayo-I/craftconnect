@@ -164,3 +164,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 #AUTH_USER_MODEL = 'users.User'
+
+GROQ_API_KEY = "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"
+
+STATIC_ROOT = BASE_DIR / "staticfiles"

@@ -1,193 +1,282 @@
-from django.shortcuts import render
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# assessments/views.py
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from .models import Assessment
-from users.models import Artisan
-from .serializers import AssessmentSerializer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+import json
 
+from .models import Assessment
+from .serializers import AssessmentSerializer
+from users.models import Artisan
+from assessments.groq_client import groq_generate
 
-#Load model once at startup
-model_name = "microsoft/phi-3-mini-4k-instruct"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
-
-
-#generate assessment
+# --------------------------------------------------------
+# START ASSESSMENT
+# --------------------------------------------------------
 @swagger_auto_schema(
     method='post',
-    operation_summary="Start an AI-powered assessment for an artisan",
-    operation_description="""
-    Generates trade-specific assessment questions using an open-source AI model.
-    The artisan’s trade category is used to tailor the questions.
-    """,
+    operation_summary="Start AI Assessment",
     request_body=openapi.Schema(
         type=openapi.TYPE_OBJECT,
-        required=['artisan_id', 'trade_category'],
+        required=['trade_category', 'artisan'],
         properties={
-            'artisan_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Artisan ID'),
-            'trade_category': openapi.Schema(type=openapi.TYPE_STRING, description='Trade category (e.g., plumber, tailor, carpenter)'),
-        },
-        example={
-            "artisan_id": 1,
-            "trade_category": "plumber"
+            'trade_category': openapi.Schema(
+                type=openapi.TYPE_STRING,
+                description="Trade category e.g. Tailor, Welder"
+            ),
+            'artisan': openapi.Schema(
+                type=openapi.TYPE_INTEGER,
+                description="Artisan ID"
+            ),
         }
-    ),
-    responses={
-        201: openapi.Response(
-            description="Assessment started successfully",
-            examples={
-                "application/json": {
-                    "message": "AI assessment started successfully.",
-                    "assessment": {
-                        "id": 5,
-                        "artisan": 1,
-                        "trade_category": "plumber",
-                        "questions": [
-                            "What are the tools used to fix a leaking pipe?",
-                            "Explain one safety precaution while soldering a pipe."
-                        ],
-                        "status": "pending"
-                    }
-                }
-            }
-        ),
-        400: "Invalid input",
-        404: "Artisan not found",
-        500: "Internal server error"
-    }
+    )
 )
 @api_view(['POST'])
 def start_assessment(request):
     try:
-        artisan_id = request.data.get('artisan_id')
-        trade_category = request.data.get('trade_category')
+        trade_category = request.data.get("trade_category")
+        artisan = request.data.get("artisan")
 
-        if not artisan_id or not trade_category:
+        # Input validation
+        if not trade_category or not artisan:
             return Response(
-                {"error": "artisan_id and trade_category are required."}, 
+                {"error": "trade_category and artisan are required"},
                 status=status.HTTP_400_BAD_REQUEST
-                )
+            )
 
-        artisan = Artisan.objects.filter(id=artisan_id).first()
-        if not artisan:
+        # Updated strict prompt to match submit endpoint requirements
+        prompt = f"""
+Generate EXACTLY 5 exam-style multiple-choice questions for the trade: "{trade_category}".
+
+STRICT RULES:
+- Only JSON output.
+- No explanation or extra text.
+- Each question must have options A–D.
+- "answer" MUST be one of: "A", "B", "C", or "D".
+- Output MUST MATCH this structure:
+
+{{
+  "questions": [
+    {{
+      "question": "string",
+      "options": {{
+        "A": "string",
+        "B": "string",
+        "C": "string",
+        "D": "string"
+      }},
+      "answer": "A"
+    }}
+  ]
+}}
+"""
+
+        # Call Groq AI
+        try:
+            output = groq_generate(prompt)
+        except Exception as e:
             return Response(
-                {"error": "Artisan not found."}, 
-                status=status.HTTP_404_NOT_FOUND
+                {"error": "AI generation failed", "details": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        # Parse AI JSON
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return Response(
+                {"error": "Invalid JSON returned by AI", "raw_output": output},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        questions = data.get("questions")
+
+        # Validate questions
+        if (
+            not questions
+            or not isinstance(questions, list)
+            or len(questions) != 5
+        ):
+            return Response(
+                {
+                    "error": "AI did not return 5 valid questions",
+                    "raw_output": data
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Extra validation of structure (to prevent malformed data)
+        for q in questions:
+            if (
+                "question" not in q or
+                "options" not in q or
+                "answer" not in q or
+                not isinstance(q["options"], dict) or
+                set(q["options"].keys()) != {"A", "B", "C", "D"} or
+                q["answer"] not in ["A", "B", "C", "D"]
+            ):
+                return Response(
+                    {"error": "AI returned questions in an invalid structure", "details": q},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
-        prompt = f"Generate 3 short assessment questions for a skilled {trade_category} in Nigeria."
-        inputs = tokenizer(prompt, return_tensors="pt")
-        outputs = model.generate(**inputs, max_new_tokens=80)
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        questions = [q.strip() for q in generated_text.split("\n") if q.strip() and "?" in q]
-        if not questions:
-            questions = [
-                "Describe your trade expertise.",
-                "Mention two key tools you use daily.",
-                "Explain one safety precaution in your work."
-            ]
-
+        # Save assessment
         assessment = Assessment.objects.create(
-            artisan=artisan,
             trade_category=trade_category,
-            questions=questions
+            artisan_id=artisan,
+            questions=questions,
+            status="pending"
         )
 
-        serializer = AssessmentSerializer(assessment)
         return Response({
             "message": "AI assessment started successfully.",
-            "assessment": serializer.data
-        }, status=status.HTTP_201_CREATED)
+            "assessment": AssessmentSerializer(assessment).data
+        })
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
+        return Response({"error": str(e)}, status=500)
 
-#Submit endpoint
+
+
+# --------------------------------------------------------
+# SUBMIT ASSESSMENT
+# --------------------------------------------------------
 @swagger_auto_schema(
     method='post',
-    operation_summary="Submit AI assessment answers for scoring and feedback",
-    operation_description="""
-    Submits the artisan’s answers, then the AI model evaluates and provides feedback with a score.
-    """,
+    operation_summary="Submit completed AI assessment",
     request_body=openapi.Schema(
         type=openapi.TYPE_OBJECT,
-        required=['assessment_id', 'answers'],
+        required=["assessment_id", "answers"],
         properties={
-            'assessment_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Assessment ID'),
-            'answers': openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                description='Key-value pairs of answers',
-                example={
-                    "1": "I use a wrench and pliers to fix pipes.",
-                    "2": "I always wear gloves when handling hot tools."
-                }
+            "assessment_id": openapi.Schema(
+                type=openapi.TYPE_INTEGER,
+                description="The ID of the assessment"
             ),
-        },
-    ),
-    responses={
-        200: openapi.Response(
-            description="Assessment submitted successfully",
-            examples={
-                "application/json": {
-                    "message": "Assessment submitted successfully.",
-                    "result": {
-                        "id": 5,
-                        "score": 87,
-                        "ai_feedback": "Good understanding of safety and tools. Keep improving precision work.",
-                        "status": "completed"
-                    }
-                }
-            }
-        ),
-        400: "Missing assessment_id or answers",
-        404: "Assessment not found",
-        500: "Internal server error"
-    }
+            "answers": openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                description="User's selected answers in order (A, B, C, or D)",
+                items=openapi.Items(type=openapi.TYPE_STRING)
+            ),
+        }
+    )
 )
-@api_view(['POST'])
+@api_view(["POST"])
 def submit_assessment(request):
     try:
-        assessment_id = request.data.get('assessment_id')
-        answers = request.data.get('answers')
+        assessment_id = request.data.get("assessment_id")
+        answers = request.data.get("answers")
 
-        if not assessment_id or not answers:
-            return Response({"error": "assessment_id and answers are required."}, status=status.HTTP_400_BAD_REQUEST)
+        # Validate input
+        if not assessment_id or not isinstance(answers, list):
+            return Response(
+                {"error": "assessment_id and answers(list) are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        # Get assessment
         assessment = Assessment.objects.filter(id=assessment_id).first()
         if not assessment:
-            return Response({"error": "Assessment not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "Assessment not found"}, status=404)
 
+        questions = assessment.questions
+        total = len(questions)
+
+        if len(answers) != total:
+            return Response(
+                {"error": f"You must submit exactly {total} answers"},
+                status=400
+            )
+
+        # Auto-score locally
+        correct_count = 0
+        wrong_list = []
+
+        for idx, q in enumerate(questions):
+            correct = q["answer"]
+            user_ans = answers[idx]
+
+            if user_ans == correct:
+                correct_count += 1
+            else:
+                wrong_list.append({
+                    "question_number": idx + 1,
+                    "question": q["question"],
+                    "correct_answer": correct,
+                    "user_answer": user_ans
+                })
+
+        score = int((correct_count / total) * 100)
+
+        # Build AI evaluation input
         qa_text = ""
-        for q, a in zip(assessment.questions, answers.values()):
-            qa_text += f"Question: {q}\nAnswer: {a}\n"
+        for idx, q in enumerate(questions, start=1):
+            qa_text += f"""
+Q{idx}: {q['question']}
+Correct: {q['answer']}
+User: {answers[idx-1]}
+"""
 
-        feedback_prompt = f"Review the following artisan answers for {assessment.trade_category} skill and give a short feedback and score out of 100:\n{qa_text}\nFeedback:"
-        inputs = tokenizer(feedback_prompt, return_tensors="pt")
-        outputs = model.generate(**inputs, max_new_tokens=120)
-        feedback = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Build AI prompt
+        prompt = f"""
+You are evaluating an artisan's skill assessment. 
+Analyze each question and the user's answers.
 
-        import re
-        match = re.search(r'(\d{1,3})', feedback)
-        score = float(match.group(1)) if match else 60.0
+Return **detailed JSON only**, no extra text.
 
+Required JSON format:
+{{
+  "score": {score},
+  "feedback": {{
+    "summary": "string",
+    "strengths": "string",
+    "weaknesses": "string",
+    "wrong_questions": [
+        {{
+          "question_number": number,
+          "correct_answer": "A/B/C/D",
+          "user_answer": "A/B/C/D",
+          "explanation": "string"
+        }}
+    ],
+    "recommendation": "string"
+  }}
+}}
+
+Here are the user's answers:
+{qa_text}
+"""
+
+        # Call Groq AI
+        try:
+            ai_output = groq_generate(prompt)
+        except Exception as e:
+            return Response(
+                {"error": "AI evaluation failed", "details": str(e)},
+                status=500
+            )
+
+        # Parse returned JSON
+        try:
+            result = json.loads(ai_output)
+        except:
+            return Response(
+                {"error": "Invalid AI JSON response", "raw_output": ai_output},
+                status=500
+            )
+
+        # Save results
         assessment.answers = answers
-        assessment.ai_feedback = feedback
-        assessment.score = score
+        assessment.score = result.get("score", score)
+        assessment.ai_feedback = result.get("feedback", {})
         assessment.status = "completed"
         assessment.save()
 
-        serializer = AssessmentSerializer(assessment)
         return Response({
-            "message": "Assessment submitted successfully.",
-            "result": serializer.data
-        }, status=status.HTTP_200_OK)
+            "message": "Assessment submitted.",
+            "result": AssessmentSerializer(assessment).data
+        })
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"error": str(e)}, status=500)
