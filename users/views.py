@@ -6,8 +6,8 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.hashers import check_password
-from .models import Artisan, Client
-from .serializers import ArtisanSerializer, ClientSerializer
+from .models import Artisan, Client, TradeCategory
+from .serializers import ArtisanSerializer, ClientSerializer, TradeCategorySerializer
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 
@@ -336,3 +336,60 @@ def get_logged_in_user(request):
 
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+#Create Trade Category
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Add a Trade Category",
+    operation_description="Create a new trade category used by artisans during registration.",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['name'],
+        properties={
+            'name': openapi.Schema(
+                type=openapi.TYPE_STRING,
+                description="Name of the trade category. Example: 'Electrician'"
+            )
+        }
+    ),
+    responses={
+        201: openapi.Response(
+            description="Category added successfully",
+            schema=TradeCategorySerializer
+        ),
+        400: "Bad Request"
+    }
+)
+@api_view(["POST"])
+def add_trade_category(request):
+    serializer = TradeCategorySerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(
+            {"message": "Trade category added successfully", "data": serializer.data},
+            status=status.HTTP_201_CREATED
+        )
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+#Get all Trade categories
+@swagger_auto_schema(
+    method='get',
+    operation_summary="List All Trade Categories",
+    operation_description="Retrieve all available trade categories used on the platform.",
+    responses={
+        200: openapi.Response(
+            description="Success",
+            schema=TradeCategorySerializer(many=True)
+        )
+    }
+)
+@api_view(["GET"])
+def list_trade_categories(request):
+    categories = TradeCategory.objects.all().order_by("name")
+    serializer = TradeCategorySerializer(categories, many=True)
+    return Response(serializer.data)
