@@ -44,6 +44,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/users/', include('users.urls')),
     path('api/assessment/', include('assessments.urls')),
+    path("api/jobs/", include("jobs.urls")),
+
 
     # Swagger documentation
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='swagger-ui'),
