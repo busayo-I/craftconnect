@@ -10,6 +10,9 @@ from .models import Artisan, Client, TradeCategory
 from .serializers import ArtisanSerializer, ClientSerializer, TradeCategorySerializer
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.backends import TokenBackend
+
 
 
 #Artisan Registration
@@ -131,7 +134,8 @@ def user_login(request):
                 )
 
         #Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
+        token = RefreshToken.for_user(user)
+        token['email_address'] = user.email_address
 
         #Get user data
         if user_type == "Artisan":
@@ -150,8 +154,8 @@ def user_login(request):
             'user_type': user_type,
             'user': user_data,
             'tokens': {
-                'access': str(refresh.access_token),
-                'refresh': str(refresh)
+                'access': str(token.access_token),
+                'refresh': str(token)
                 }, 
             }, 
             status=status.HTTP_200_OK)
@@ -289,15 +293,15 @@ def update_user_profile(request):
                 "application/json": {
                     "user": {
                         "id": 1,
-                        "first_name": "Ibrahim",
-                        "last_name": "Busayo",
-                        "email_address": "ibrahimbusayo2018@gmail.com",
+                        "first_name": "user",
+                        "last_name": "user",
+                        "email_address": "example@gmail.com",
                         "phone_number": "08012345678",
                         "bio": "Professional electrician",
                         "business_name": "IB Tech Repairs",
                         "location": "Abuja",
                         "language": "English",
-                        "profile_picture": "http://127.0.0.1:8000/media/profiles/ibrahim.jpg"
+                        "profile_picture": "http://127.0.0.1:8000/media/profiles/user.jpg"
                     }
                 }
             }
@@ -306,36 +310,53 @@ def update_user_profile(request):
         404: "User not found."
     }
 )
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_logged_in_user(request):
-    """
-    Returns the profile details of the currently logged-in user.
-    """
     try:
-        email = request.user.email
+        # Get raw token from header
+        auth_header = request.headers.get("Authorization")
+
+        if not auth_header or "Bearer" not in auth_header:
+            return Response({"error": "Token missing"}, status=401)
+
+        raw_token = auth_header.split(" ")[1]
+
+        # Decode token manually
+        backend = TokenBackend(algorithm='HS256')
+        decoded = backend.decode(raw_token, verify=False)
+
+        email = decoded.get("email_address")
+
+        if not email:
+            return Response({"error": "Email missing in token"}, status=400)
+
+        # Find user in Artisan
         user = Artisan.objects.filter(email_address=email).first()
         serializer_class = ArtisanSerializer
 
+        # If not in Artisan, check Client
         if not user:
             user = Client.objects.filter(email_address=email).first()
             serializer_class = ClientSerializer
 
         if not user:
-            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "User not found"}, status=404)
 
+        # Serialize user
         serializer = serializer_class(user)
         data = serializer.data
-        data.pop('password', None)
+        data.pop("password", None)
 
-        if hasattr(user, 'profile_picture') and user.profile_picture:
-            data['profile_picture'] = request.build_absolute_uri(user.profile_picture.url)
+        # Add absolute URL to profile picture
+        if user.profile_picture:
+            data["profile_picture"] = request.build_absolute_uri(user.profile_picture.url)
 
-        return Response({'user': data}, status=status.HTTP_200_OK)
+        return Response({"user": data}, status=200)
 
     except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"error": str(e)}, status=500)
+
 
 
 

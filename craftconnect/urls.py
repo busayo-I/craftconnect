@@ -22,11 +22,15 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from django.conf import settings
 from django.conf.urls.static import static
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
-# Health check root view
+
+# Root health check endpoint
 def home(request):
     return JsonResponse({"status": "ok", "message": "CraftConnect API is running"})
 
+
+# Swagger / ReDoc schema
 schema_view = get_schema_view(
     openapi.Info(
         title="CraftConnect API",
@@ -36,18 +40,18 @@ schema_view = get_schema_view(
     ),
     public=True,
     permission_classes=(permissions.AllowAny,),
+    authentication_classes=[JWTAuthentication],
 )
 
 urlpatterns = [
-    path('', home, name="home"),  # 👈 FIXED: root URL
+    path('', home, name="home"),
 
     path('admin/', admin.site.urls),
     path('api/users/', include('users.urls')),
     path('api/assessment/', include('assessments.urls')),
     path("api/jobs/", include("jobs.urls")),
 
-
-    # Swagger documentation
+    # Swagger docs
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='redoc-ui'),
 ]
